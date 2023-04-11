@@ -1,4 +1,4 @@
-module ps/addmissionController
+module github.com/pascal-sochacki/admissionController
 
 go 1.20
 

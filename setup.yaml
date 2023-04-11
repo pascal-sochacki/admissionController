@@ -49,19 +49,19 @@ subjects:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: test
+  name: admission-controller-webhook-service
   labels:
-    run: test
+    run: admission-controller-webhook-service
 spec:
   template:
     metadata:
       labels:
-        run: test
+        run: admission-controller-webhook-service
     spec:
       serviceAccountName: admission-controller
       containers:
         - image: controller:v1.4
-          name: test
+          name: admission-controller-webhook-service
           env:
             - name: POD_NAMESPACE
               value: default
@@ -77,13 +77,13 @@ spec:
             secretName: admission-controller
   selector:
     matchLabels:
-      run: test
+      run: admission-controller-webhook-service
 ---
 apiVersion: v1
 kind: Service
 metadata:
   labels:
-    run: test
+    run: admission-controller-webhook-service
   name: admission-controller-webhook-service
 spec:
   ports:
@@ -91,14 +91,14 @@ spec:
       protocol: TCP
       targetPort: 443
   selector:
-    run: test
+    run: admission-controller-webhook-service
 ---
 kind: ValidatingWebhookConfiguration
 apiVersion: admissionregistration.k8s.io/v1
 metadata:
   name: admission-controller-validating-webhook-configuration
 webhooks:
-  - name: test.test.test
+  - name: admission-controller-webhook-service.default.svc
     clientConfig:
       service:
         name: admission-controller-webhook-service
@@ -113,6 +113,31 @@ webhooks:
           - "configmaps"
         operations:
           - "CREATE"
+    sideEffects: None
+    admissionReviewVersions:
+      - "v1"
+---
+kind: MutatingWebhookConfiguration
+apiVersion: admissionregistration.k8s.io/v1
+metadata:
+  name: admission-controller-mutation-webhook-configuration
+webhooks:
+  - name: admission-controller-webhook-service.default.svc
+    clientConfig:
+      service:
+        name: admission-controller-webhook-service
+        namespace: default
+        path: /mutate
+    rules:
+      - apiGroups:
+          - ""
+        apiVersions:
+          - "v1"
+        resources:
+          - "configmaps"
+        operations:
+          - "CREATE"
+          - "UPDATE"
     sideEffects: None
     admissionReviewVersions:
       - "v1"

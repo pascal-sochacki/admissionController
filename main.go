@@ -1,57 +1,29 @@
 package main
 
 import (
-	"context"
 	"flag"
 	"fmt"
 	"log"
 	"os"
 
-	v1 "k8s.io/api/admission/v1"
-	core "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/runtime"
-	ctrl "sigs.k8s.io/controller-runtime"
+	"github.com/pascal-sochacki/admissionController/pkg/mutation"
+	"github.com/pascal-sochacki/admissionController/pkg/validation"
 
-	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
-	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
+	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
 
 	"github.com/open-policy-agent/cert-controller/pkg/rotator"
-	"k8s.io/apimachinery/pkg/api/meta"
-	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/rest"
+
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
+	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
-type Handle struct {
-	decoder *admission.Decoder
-}
-
-func (h Handle) Handle(ctx context.Context, request admission.Request) admission.Response {
-	configMap := &core.ConfigMap{}
-
-	err := h.decoder.Decode(request, configMap)
-	if err != nil {
-		return admission.Response{}
-	}
-
-	log.Print(configMap)
-	return admission.Response{
-		AdmissionResponse: v1.AdmissionResponse{
-			Allowed: true,
-		},
-	}
-}
-
-func GetNamespace() string {
-	ns, found := os.LookupEnv("POD_NAMESPACE")
-	if !found {
-		return "default"
-	}
-	return ns
-}
-
 var (
-	scheme = runtime.NewScheme()
+	ownScheme = runtime.NewScheme()
 
 	secretName      = "admission-controller"
 	certDir         = flag.String("cert-dir", "./certs", "The directory where certs are stored, defaults to /certs")
@@ -59,21 +31,35 @@ var (
 	port            = flag.Int("port", 443, "port for the server. defaulted to 443 if unspecified ")
 	host            = flag.String("host", "", "the host address the webhook server listens on. defaults to all addresses.")
 	VwhName         = flag.String("validating-webhook-configuration-name", "admission-controller-validating-webhook-configuration", "name of the ValidatingWebhookConfiguration")
+	MwhName         = flag.String("mutation-webhook-configuration-name", "admission-controller-mutation-webhook-configuration", "name of the MutatingWebhookConfiguration")
 
 	caName         = "admission-controller-ca"
 	caOrganization = "admission-controller"
 )
 
 func main() {
+	ns, found := os.LookupEnv("POD_NAMESPACE")
+	if !found {
+		log.Fatalln("Dont know my namespace, please set POD_NAMESPACE env")
+	}
 
-	clientgoscheme.AddToScheme(scheme)
+	err := scheme.AddToScheme(ownScheme)
+	if err != nil {
+		log.Fatalln(err.Error())
+	}
+
+	decoder, err := admission.NewDecoder(ownScheme)
+	if err != nil {
+		log.Fatalln(err.Error())
+	}
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		LeaderElection: false,
 		Port:           *port,
-		Scheme:         scheme,
+		Scheme:         ownScheme,
 		Host:           *host,
 		CertDir:        *certDir,
+
 		MapperProvider: func(c *rest.Config) (meta.RESTMapper, error) {
 			return apiutil.NewDynamicRESTMapper(c)
 		},
@@ -87,35 +73,36 @@ func main() {
 		Name: *VwhName,
 		Type: rotator.Validating,
 	})
+	webhooks = append(webhooks, rotator.WebhookInfo{
+		Name: *MwhName,
+		Type: rotator.Mutating,
+	})
 
 	setupFinished := make(chan struct{})
 	if err := rotator.AddRotator(mgr, &rotator.CertRotator{
 		SecretKey: types.NamespacedName{
-			Namespace: GetNamespace(),
+			Namespace: ns,
 			Name:      secretName,
 		},
 		CertDir:        *certDir,
 		CAName:         caName,
 		Webhooks:       webhooks,
 		CAOrganization: caOrganization,
-		DNSName:        fmt.Sprintf("%s.%s.svc", *certServiceName, GetNamespace()),
+		DNSName:        fmt.Sprintf("%s.%s.svc", *certServiceName, ns),
 		IsReady:        setupFinished,
 	}); err != nil {
 		log.Fatalln(err, "unable to set up cert rotation")
 	}
-
-	decoder, err := admission.NewDecoder(scheme)
-	if err != nil {
-		log.Fatalln(err.Error())
-	}
-
-	wh := &admission.Webhook{
-		Handler: Handle{
-			decoder: decoder,
+	mgr.GetWebhookServer().Register("/validate", &admission.Webhook{
+		Handler: validation.Handler{
+			Decoder: decoder,
 		},
-	}
-
-	mgr.GetWebhookServer().Register("/validate", wh)
+	})
+	mgr.GetWebhookServer().Register("/mutate", &admission.Webhook{
+		Handler: mutation.Handler{
+			Decoder: decoder,
+		},
+	})
 
 	err = mgr.Start(ctrl.SetupSignalHandler())
 	if err != nil {
