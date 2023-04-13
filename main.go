@@ -8,6 +8,8 @@ import (
 
 	"github.com/pascal-sochacki/admissionController/pkg/mutation"
 	"github.com/pascal-sochacki/admissionController/pkg/validation"
+	"github.com/pascal-sochacki/admissionController/pkg/watcher"
+	"k8s.io/client-go/kubernetes"
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -40,7 +42,8 @@ var (
 func main() {
 	ns, found := os.LookupEnv("POD_NAMESPACE")
 	if !found {
-		log.Fatalln("Dont know my namespace, please set POD_NAMESPACE env")
+		ns = "default"
+		//log.Fatalln("Dont know my namespace, please set POD_NAMESPACE env")
 	}
 
 	err := scheme.AddToScheme(ownScheme)
@@ -53,7 +56,12 @@ func main() {
 		log.Fatalln(err.Error())
 	}
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	die := ctrl.GetConfigOrDie()
+
+	if err != nil {
+		return
+	}
+	mgr, err := ctrl.NewManager(die, ctrl.Options{
 		LeaderElection: false,
 		Port:           *port,
 		Scheme:         ownScheme,
@@ -64,6 +72,7 @@ func main() {
 			return apiutil.NewDynamicRESTMapper(c)
 		},
 	})
+
 	if err != nil {
 		log.Fatalln(err.Error())
 	}
@@ -93,6 +102,20 @@ func main() {
 	}); err != nil {
 		log.Fatalln(err, "unable to set up cert rotation")
 	}
+
+	client, err := kubernetes.NewForConfig(die)
+	if err != nil {
+		log.Fatalln(err.Error())
+	}
+
+	err = mgr.Add(watcher.Watcher{
+		Client: *client,
+	})
+
+	if err != nil {
+		log.Fatalln(err.Error())
+	}
+
 	mgr.GetWebhookServer().Register("/validate", &admission.Webhook{
 		Handler: validation.Handler{
 			Decoder: decoder,
